@@ -66,7 +66,8 @@ AI-ML-Data-Science-Simulation/
 │   └── forecast_models.py         # Linear Regression + Random Forest training
 │
 ├── viz/
-│   └── tableau_export.py          # Generates 3 chart PNGs
+│   ├── tableau_export.py          # Generates 3 chart PNGs
+│   └── dashboard.py               # Interactive Streamlit dashboard web app
 │
 ├── output/                        # Auto-created: charts, model .pkl files
 └── data/                          # Auto-created: SQLite database
@@ -135,12 +136,17 @@ python ingestion/branch_aggregator.py
 python models/forecast_models.py
 ```
 
-### 5. Generate Visualizations
+### 5. Generate Visualizations (Static PNGs)
 ```bash
 python viz/tableau_export.py
 ```
 
-### 6. View SQL Schema & Queries
+### 6. Run the Interactive Dashboard
+```bash
+streamlit run viz/dashboard.py
+```
+
+### 7. View SQL Schema & Queries
 Open `db/schema.sql` and `db/queries.sql` in any SQL editor (e.g., DB Browser for SQLite).
 
 ---
