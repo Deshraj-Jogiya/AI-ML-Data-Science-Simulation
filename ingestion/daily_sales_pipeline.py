@@ -35,7 +35,7 @@ np.random.seed(RANDOM_SEED)
 # Simulation period: 90 days ending yesterday
 SIM_END_DATE   = datetime(2024, 6, 30)
 SIM_START_DATE = SIM_END_DATE - timedelta(days=89)  # 90 days total
-RECORDS_PER_BRANCH_PER_DAY = 20  # 20 product transactions per branch per day
+RECORDS_PER_BRANCH_PER_DAY = 30  # every product's daily sales at every branch (30 products)
 
 # ---------------------------------------------------------------------------
 # Branch Definitions (5 stores across the U.S.)
@@ -165,8 +165,8 @@ def generate_daily_records(branch: dict, date: datetime) -> list[dict]:
     d_mult = day_of_week_multiplier(date)
     br_mult = branch["base_revenue_multiplier"]
 
-    # Sample products for this day (with replacement for variety)
-    day_products = random.choices(PRODUCTS, k=RECORDS_PER_BRANCH_PER_DAY)
+    # A store sells its whole catalogue every day: one demand record per product
+    day_products = PRODUCTS
 
     for prod in day_products:
         cat_cfg   = CATEGORIES[prod["category"]]
@@ -207,7 +207,7 @@ def generate_daily_records(branch: dict, date: datetime) -> list[dict]:
 def run_pipeline():
     """
     Full ETL pipeline:
-    1. Generate 90 days × 5 branches × 20 records of synthetic sales
+    1. Generate 90 days × 5 branches × 30 products of synthetic daily sales
     2. Load into SQLite branch_sales table
     3. Print ingestion summary
     """

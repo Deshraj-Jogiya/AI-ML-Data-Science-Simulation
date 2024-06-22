@@ -1,8 +1,8 @@
 """
-tableau_export.py
-------------------
+trend_charts.py
+---------------
 AI-ML Data Science Simulation Project
-Generates 3 Matplotlib/Seaborn charts simulating Tableau-style exports:
+Generates 3 Matplotlib/Seaborn trend charts (the interactive version is the Tableau Public dashboard):
   (a) Weekly revenue trends by branch
   (b) Product category breakdown pie chart
   (c) Forecast vs Actual line chart
@@ -270,94 +270,41 @@ def chart_category_breakdown(df: pd.DataFrame):
 
 def chart_forecast_vs_actual(df: pd.DataFrame):
     """
-    Line chart comparing actual daily units sold vs a simulated
-    model forecast.  The 'forecast' uses a 7-day rolling mean
-    + simulated Random Forest predictions with realistic noise.
+    Actual daily units (all branches and categories) against the Random Forest's held-out forecasts and the
+    last-week baseline, read from exports/forecast_vs_actual.csv written by models/forecast_models.py.
     """
     log.info("Generating Chart 3: Forecast vs Actual ...")
+    exports = BASE_DIR / "exports"
+    fc_path, metrics_path = exports / "forecast_vs_actual.csv", exports / "model_metrics.csv"
+    if not fc_path.exists():
+        log.error(f"{fc_path} not found. Run models/forecast_models.py first.")
+        return
+    fc = pd.read_csv(fc_path, parse_dates=["sale_date"])
+    daily = fc.groupby("sale_date")[["units_sold", "rf_forecast", "naive_forecast"]].sum().reset_index()
+    metrics = pd.read_csv(metrics_path).set_index("model")
 
-    # Aggregate daily units across all branches
-    daily = (
-        df.groupby("sale_date")
-        .agg(actual_units=("units_sold", "sum"))
-        .reset_index()
-        .sort_values("sale_date")
-    )
-
-    # Simulate model forecast: rolling mean + small noise
-    np.random.seed(42)
-    rolling_mean = daily["actual_units"].rolling(7, min_periods=1).mean()
-    noise = np.random.normal(0, rolling_mean.std() * 0.08, size=len(daily))
-    daily["forecast_units"] = (rolling_mean + noise).clip(lower=0).round().astype(int)
-
-    # Confidence interval (±1 std from rolling window)
-    rolling_std = daily["actual_units"].rolling(7, min_periods=1).std().fillna(0)
-    daily["ci_upper"] = daily["forecast_units"] + rolling_std * 0.6
-    daily["ci_lower"] = (daily["forecast_units"] - rolling_std * 0.6).clip(lower=0)
-
-    # --- Plot ---
-    fig, ax = plt.subplots(figsize=(14, 7))
+    fig, ax = plt.subplots(figsize=(14, 6))
     fig.patch.set_facecolor(DARK_BG)
     ax.set_facecolor(PANEL_BG)
-
-    ax.fill_between(
-        daily["sale_date"],
-        daily["ci_lower"], daily["ci_upper"],
-        color="#4C9BE8", alpha=0.15, label="95% Confidence Band"
-    )
-    ax.plot(
-        daily["sale_date"], daily["actual_units"],
-        color="#2ECC71", linewidth=2.0, label="Actual Units Sold", alpha=0.9
-    )
-    ax.plot(
-        daily["sale_date"], daily["forecast_units"],
-        color="#E87C4C", linewidth=2.0, linestyle="--",
-        label="ML Forecast (RF)", alpha=0.9
-    )
-
-    # Shade weekends
-    for i, row in daily.iterrows():
-        if row["sale_date"].dayofweek >= 5:
-            ax.axvspan(
-                row["sale_date"] - pd.Timedelta(hours=12),
-                row["sale_date"] + pd.Timedelta(hours=12),
-                color="white", alpha=0.025
-            )
-
-    ax.set_title(
-        "Forecast vs Actual – Daily Units Sold (All Branches)\nApril – June 2024",
-        color=TEXT_MAIN, fontsize=16, fontweight="bold", pad=18
-    )
-    ax.set_xlabel("Date", color=TEXT_SUB, fontsize=12, labelpad=8)
-    ax.set_ylabel("Units Sold", color=TEXT_SUB, fontsize=12, labelpad=8)
-    ax.tick_params(colors=TEXT_SUB, labelsize=10)
-    ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%b %d"))
-    ax.xaxis.set_major_locator(matplotlib.dates.WeekdayLocator(byweekday=0, interval=2))
-    plt.xticks(rotation=30, ha="right")
-
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
-    ax.grid(axis="y", color=GRID_COL, linestyle="--", linewidth=0.8, alpha=0.7)
-    ax.grid(axis="x", color=GRID_COL, linestyle=":",  linewidth=0.5, alpha=0.4)
+    ax.plot(daily["sale_date"], daily["units_sold"], color="#2ECC71", linewidth=2.5, marker="o", markersize=4,
+            label="Actual units")
+    ax.plot(daily["sale_date"], daily["rf_forecast"], color="#E87C4C", linewidth=2.2, linestyle="--",
+            label="Random Forest forecast")
+    ax.plot(daily["sale_date"], daily["naive_forecast"], color="#8899AA", linewidth=1.5, linestyle=":",
+            label="Same weekday last week")
+    ax.set_title("Forecast vs Actual on the four held-out weeks (daily units, all branches)",
+                 color="white", fontsize=14, fontweight="bold", pad=12)
+    ax.set_ylabel("Units sold", color="#CCCCCC")
+    ax.tick_params(colors="#CCCCCC")
     for spine in ax.spines.values():
-        spine.set_edgecolor(GRID_COL)
-
-    # R² annotation box
-    from sklearn.metrics import r2_score as r2
-    r2_val = r2(daily["actual_units"], daily["forecast_units"])
-    ax.text(
-        0.97, 0.95,
-        f"Model R² = {r2_val:.4f}\nForecast Accuracy ≈ {r2_val*100:.1f}%",
-        transform=ax.transAxes,
-        ha="right", va="top",
-        fontsize=11, color=TEXT_MAIN,
-        bbox=dict(facecolor=PANEL_BG, edgecolor=GRID_COL, alpha=0.85, boxstyle="round,pad=0.5")
-    )
-
-    legend = ax.legend(
-        fontsize=10, loc="upper left",
-        framealpha=0.25, facecolor=PANEL_BG,
-        labelcolor=TEXT_MAIN, edgecolor=GRID_COL
-    )
+        spine.set_edgecolor("#2A3A50")
+    ax.grid(color="#2A3A50", linestyle="--", alpha=0.5)
+    ax.legend(fontsize=10, framealpha=0.3, labelcolor="white", loc="upper left")
+    rf, naive = metrics.loc["RandomForest"], metrics.loc["NaiveLastWeek"]
+    ax.text(0.99, 0.04,
+            f"Forecast accuracy (1 - WAPE): Random Forest {rf['forecast_accuracy']:.1%}, last-week baseline "
+            f"{naive['forecast_accuracy']:.1%}\nComputed per branch, category and day; the chart sums them",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=9.5, color="#CCCCCC")
 
     out_path = OUTPUT_DIR / "forecast_vs_actual.png"
     plt.tight_layout()
@@ -372,7 +319,7 @@ def chart_forecast_vs_actual(df: pd.DataFrame):
 
 def run_visualisations():
     log.info("=" * 60)
-    log.info("  AI-ML Data Science Simulation – Tableau Exports")
+    log.info("  AI-ML Data Science Simulation – Trend Charts")
     log.info("=" * 60)
 
     conn = get_conn()
