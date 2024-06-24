@@ -7,16 +7,18 @@ Linear Regression and Random Forest, and trend charts.
 
 ## Highlights
 
-- **Multi-branch ETL:** daily sales for 30 products at 5 simulated branches over 90 days (13,500 records), aggregated by
-  `ingestion/branch_aggregator.py`.
-- **Reconciliation:** daily cross-branch checks keep the branch datasets consistent.
-- **Forecasting:** daily demand per branch and category, predicted only from data at least a week old so a weekly reorder can
-  use it. On the four held-out weeks the Random Forest reaches **90.4% forecast accuracy** (1 − WAPE; R² 0.96) against 87.8% for
-  a same-weekday-last-week baseline, and Linear Regression reaches 90.2%.
-- **Reorder simulation:** topping stock up each week to the forecast plus 10% cut stock-out days from 7 to 3 compared with
-  reordering last week's sales, but left slightly more units short (204 vs 109) at a 99.7% vs 99.9% fill rate. Demand in this
-  simulation is steady week to week, so the forecast's edge over the simple policy is small; `exports/reorder_policy_comparison.csv`
-  holds the numbers.
+- **Multi-branch ETL:** daily sales for 30 products at 5 simulated branches over a year (2023-07-01 to 2024-06-30, 54,900 records),
+  aggregated by `ingestion/branch_aggregator.py`.
+- **Planned promotions:** each branch runs week-long category promotions (260 branch-category weeks, +30–60% demand), published
+  ahead of time in a `promotions` table the way a real promotion calendar is.
+- **Forecasting:** daily demand per branch and category, predicted only from data at least a week old plus the promotion calendar,
+  so a weekly reorder can use it. On the four held-out weeks the Random Forest reaches **90.0% forecast accuracy** (1 − WAPE;
+  R² 0.96) against 78.4% for a same-weekday-last-week baseline; Linear Regression reaches 85.9%. The Random Forest's depth and
+  leaf size were chosen on the four weeks before the test window.
+- **Reorder simulation:** topping stock up each week to the forecast plus 10%, instead of to last week's sales plus 10%, cut
+  stock-out days by **60.8%** (51 → 20), units short from 7,038 to 419 (fill rate 92.1% → 99.5%) and unsold stock per
+  branch-category week from 105 to 58 units. The gain comes from promotion weeks, which last week's sales can't anticipate;
+  `exports/reorder_policy_comparison.csv` holds the numbers.
 - **Leak-free evaluation:** the split is by date, not random, and a test checks that no feature can see the target day or the six
   days before it.
 - **Trend charts:** weekly revenue, category mix and forecast vs actual (`viz/trend_charts.py`, matplotlib), plus CSV exports in

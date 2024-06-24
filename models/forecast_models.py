@@ -70,6 +70,17 @@ def load_data() -> pd.DataFrame:
     full = pd.MultiIndex.from_product([daily["branch_id"].unique(), daily["category"].unique(), dates],
                                       names=["branch_id", "category", "sale_date"])
     daily = daily.set_index(["branch_id", "category", "sale_date"]).reindex(full, fill_value=0).reset_index()
+
+    # Planned promotions are announced ahead of time, so the forecast may use them
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        promos = pd.read_sql_query("SELECT branch_id, category, week_start FROM promotions", conn, parse_dates=["week_start"])
+    except Exception:
+        promos = pd.DataFrame(columns=["branch_id", "category", "week_start"])
+    conn.close()
+    week_start = daily["sale_date"] - pd.to_timedelta(daily["sale_date"].dt.weekday, unit="D")
+    keys = set(zip(promos["branch_id"], promos["category"], promos["week_start"]))
+    daily["on_promotion"] = [int(k in keys) for k in zip(daily["branch_id"], daily["category"], week_start)]
     log.info(f"Daily demand series: {daily.groupby(['branch_id', 'category']).ngroups} branch-category pairs x {len(dates)} days")
     return daily
 
@@ -81,6 +92,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
       - branch and category codes
       - lag_7_units, lag_14_units: demand on the same weekday one and two weeks earlier
       - rolling_7_mean, rolling_14_mean, rolling_7_std: demand over the 7 / 14 days ending 7 days before
+      - on_promotion, promotion_last_week: the planned promotion calendar (published ahead of time)
     No feature includes the target day or the 6 days before it.
     """
     df = df.copy().sort_values(["branch_id", "category", "sale_date"])
@@ -99,6 +111,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df["rolling_14_mean"] = grp.transform(lambda x: x.shift(7).rolling(14).mean())
     df["rolling_7_std"]   = grp.transform(lambda x: x.shift(7).rolling(7).std())
 
+    df["promotion_last_week"] = df.groupby(["branch_id", "category"])["on_promotion"].shift(7)
     df = df.dropna(subset=FEATURE_COLS).reset_index(drop=True)
     log.info(f"Feature-engineered dataset: {len(df):,} rows")
     return df
@@ -109,6 +122,7 @@ FEATURE_COLS = [
     "branch_encoded", "category_encoded",
     "lag_7_units", "lag_14_units",
     "rolling_7_mean", "rolling_14_mean", "rolling_7_std",
+    "on_promotion", "promotion_last_week",
 ]
 TARGET_COL = "units_sold"
 TEST_DAYS = 28          # the last four weeks are held out; the models never see them in training
@@ -133,7 +147,9 @@ def train_and_evaluate(df: pd.DataFrame) -> dict:
 
     models = {
         "LinearRegression": LinearRegression(),
-        "RandomForest": RandomForestRegressor(n_estimators=300, max_depth=8, min_samples_leaf=3,
+        # Depth and leaf size were chosen on a validation window (the four weeks before the test weeks) from
+        # depth {8, 12, unlimited} x leaf {2, 3, 5}; the test weeks played no part in the choice.
+        "RandomForest": RandomForestRegressor(n_estimators=400, max_depth=12, min_samples_leaf=2,
                                               random_state=RANDOM_SEED, n_jobs=-1),
     }
     results = {}

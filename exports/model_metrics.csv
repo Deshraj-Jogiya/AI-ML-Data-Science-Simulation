@@ -1,4 +1,4 @@
 model,r2,rmse,forecast_accuracy
-LinearRegression,0.9599,16.82,0.9017
-RandomForest,0.9592,16.97,0.9041
-NaiveLastWeek,0.9372,21.07,0.8781
+LinearRegression,0.9066,29.13,0.8591
+RandomForest,0.9591,19.28,0.9005
+NaiveLastWeek,0.7847,44.22,0.7837
