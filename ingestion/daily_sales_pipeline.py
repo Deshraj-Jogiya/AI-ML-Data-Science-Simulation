@@ -32,7 +32,7 @@ RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 
-# Simulation period: 90 days ending yesterday
+# Simulation period: one year, 2023-07-01 to 2024-06-30
 SIM_END_DATE   = datetime(2024, 6, 30)
 SIM_START_DATE = SIM_END_DATE - timedelta(days=365)  # one year plus a day (2023-07-01 to 2024-06-30)
 RECORDS_PER_BRANCH_PER_DAY = 30  # every product's daily sales at every branch (30 products)
@@ -238,7 +238,7 @@ def generate_daily_records(branch: dict, date: datetime) -> list[dict]:
 def run_pipeline():
     """
     Full ETL pipeline:
-    1. Generate 90 days × 5 branches × 30 products of synthetic daily sales
+    1. Generate 366 days × 5 branches × 30 products of synthetic daily sales
     2. Load into SQLite branch_sales table
     3. Print ingestion summary
     """
