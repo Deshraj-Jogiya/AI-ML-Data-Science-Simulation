@@ -24,6 +24,8 @@ Linear Regression and Random Forest, and trend charts.
 - **Trend charts:** weekly revenue, category mix and forecast vs actual (`viz/trend_charts.py`, matplotlib), plus CSV exports in
   `exports/` that feed the Tableau Public dashboard.
 
+Measured results, each with the question, the test and the decision: [docs/FINDINGS.md](docs/FINDINGS.md).
+
 ## Architecture
 
 ```mermaid
