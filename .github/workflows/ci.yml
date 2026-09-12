@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pipeline-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Run the real pipeline end-to-end, in the order the README documents
+        run: |
+          python ingestion/daily_sales_pipeline.py
+          python ingestion/branch_aggregator.py
+          python models/forecast_models.py
+          python viz/tableau_export.py
