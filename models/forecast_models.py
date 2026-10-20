@@ -3,8 +3,9 @@ forecast_models.py
 -------------------
 AI-ML Data Science Simulation Project
 Trains Linear Regression AND Random Forest on synthetic sales data.
-Calculates R² and RMSE, prints a comparison table, plots feature
-importance, and saves both models as .pkl files.
+Forecasts daily demand per branch and category from data at least a week old, scores Linear Regression and
+Random Forest on held-out weeks against a naive last-week baseline (R2, RMSE, forecast accuracy = 1 - WAPE),
+simulates weekly reordering to count stock-outs, plots feature importance and saves both models.
 
 Author: Deshraj Jogiya
 Date: May 2024
@@ -27,7 +28,6 @@ import seaborn as sns
 
 from sklearn.linear_model    import LinearRegression
 from sklearn.ensemble        import RandomForestRegressor
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing   import LabelEncoder
 from sklearn.metrics         import r2_score, mean_squared_error
 
@@ -54,118 +54,147 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def load_data() -> pd.DataFrame:
-    """Load branch_sales and engineer ML features."""
+    """Load branch_sales and roll it up to one row per branch, category and day (missing days count as zero sales)."""
     if not DB_PATH.exists():
         log.error(f"Database not found: {DB_PATH}. Run daily_sales_pipeline.py first.")
         sys.exit(1)
 
     conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        "SELECT * FROM branch_sales ORDER BY branch_id, product_id, sale_date",
-        conn,
-        parse_dates=["sale_date"]
-    )
+    df = pd.read_sql_query("SELECT branch_id, category, sale_date, units_sold FROM branch_sales", conn,
+                           parse_dates=["sale_date"])
     conn.close()
     log.info(f"Loaded {len(df):,} records from sales.db")
-    return df
+
+    daily = df.groupby(["branch_id", "category", "sale_date"], as_index=False)["units_sold"].sum()
+    dates = pd.date_range(daily["sale_date"].min(), daily["sale_date"].max(), freq="D")
+    full = pd.MultiIndex.from_product([daily["branch_id"].unique(), daily["category"].unique(), dates],
+                                      names=["branch_id", "category", "sale_date"])
+    daily = daily.set_index(["branch_id", "category", "sale_date"]).reindex(full, fill_value=0).reset_index()
+    log.info(f"Daily demand series: {daily.groupby(['branch_id', 'category']).ngroups} branch-category pairs x {len(dates)} days")
+    return daily
 
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build feature matrix:
-      - day_of_week, month, is_weekend
-      - branch_id encoded, category encoded
-      - lag_7_units, lag_14_units  (previous 7 / 14 days of units_sold)
-      - rolling_7_mean, rolling_14_mean
+    Features known 7 days before the day being forecast, so a weekly reorder decision can use them:
+      - day_of_week, is_weekend, day_of_month, month (calendar, always known)
+      - branch and category codes
+      - lag_7_units, lag_14_units: demand on the same weekday one and two weeks earlier
+      - rolling_7_mean, rolling_14_mean, rolling_7_std: demand over the 7 / 14 days ending 7 days before
+    No feature includes the target day or the 6 days before it.
     """
-    df = df.copy().sort_values(["branch_id", "product_id", "sale_date"])
+    df = df.copy().sort_values(["branch_id", "category", "sale_date"])
+    df["day_of_week"]  = df["sale_date"].dt.dayofweek
+    df["month"]        = df["sale_date"].dt.month
+    df["day_of_month"] = df["sale_date"].dt.day
+    df["is_weekend"]   = (df["day_of_week"] >= 5).astype(int)
 
-    # --- Temporal features ---
-    df["day_of_week"] = df["sale_date"].dt.dayofweek
-    df["month"]       = df["sale_date"].dt.month
-    df["day_of_month"]= df["sale_date"].dt.day
-    df["week_number"] = df["sale_date"].dt.isocalendar().week.astype(int)
-    df["is_weekend"]  = (df["day_of_week"] >= 5).astype(int)
+    df["branch_encoded"]   = LabelEncoder().fit_transform(df["branch_id"])
+    df["category_encoded"] = LabelEncoder().fit_transform(df["category"])
 
-    # --- Categorical encoding ---
-    le_branch   = LabelEncoder()
-    le_category = LabelEncoder()
-    df["branch_encoded"]   = le_branch.fit_transform(df["branch_id"])
-    df["category_encoded"] = le_category.fit_transform(df["category"])
+    grp = df.groupby(["branch_id", "category"])["units_sold"]
+    df["lag_7_units"]     = grp.shift(7)
+    df["lag_14_units"]    = grp.shift(14)
+    df["rolling_7_mean"]  = grp.transform(lambda x: x.shift(7).rolling(7).mean())
+    df["rolling_14_mean"] = grp.transform(lambda x: x.shift(7).rolling(14).mean())
+    df["rolling_7_std"]   = grp.transform(lambda x: x.shift(7).rolling(7).std())
 
-    # --- Lag features per branch + product ---
-    grp = df.groupby(["branch_id", "product_id"])["units_sold"]
-
-    df["lag_7_units"]      = grp.shift(7)
-    df["lag_14_units"]     = grp.shift(14)
-    df["rolling_7_mean"]   = grp.transform(lambda x: x.rolling(7,  min_periods=1).mean())
-    df["rolling_14_mean"]  = grp.transform(lambda x: x.rolling(14, min_periods=1).mean())
-    df["rolling_7_std"]    = grp.transform(lambda x: x.rolling(7,  min_periods=2).std().fillna(0))
-
-    df.dropna(subset=["lag_7_units", "lag_14_units"], inplace=True)
+    df = df.dropna(subset=FEATURE_COLS).reset_index(drop=True)
     log.info(f"Feature-engineered dataset: {len(df):,} rows")
     return df
 
 
 FEATURE_COLS = [
-    "day_of_week", "month", "day_of_month", "week_number", "is_weekend",
+    "day_of_week", "month", "day_of_month", "is_weekend",
     "branch_encoded", "category_encoded",
     "lag_7_units", "lag_14_units",
     "rolling_7_mean", "rolling_14_mean", "rolling_7_std",
 ]
 TARGET_COL = "units_sold"
+TEST_DAYS = 28          # the last four weeks are held out; the models never see them in training
+SAFETY_FACTOR = 1.10    # both reorder policies order 10% above their demand estimate
+
+
+def forecast_accuracy(y_true, y_pred) -> float:
+    """1 - WAPE: one minus total absolute error over total actual demand."""
+    return 1.0 - np.abs(np.asarray(y_true) - np.asarray(y_pred)).sum() / np.asarray(y_true).sum()
 
 # ---------------------------------------------------------------------------
 # Model training & evaluation
 # ---------------------------------------------------------------------------
 
 def train_and_evaluate(df: pd.DataFrame) -> dict:
-    """Train LR and RF, return metrics and trained models."""
-    X = df[FEATURE_COLS].values
-    y = df[TARGET_COL].values
+    """Train LR and RF on all but the last TEST_DAYS days and score them on those days, next to a naive baseline."""
+    cutoff = df["sale_date"].max() - pd.Timedelta(days=TEST_DAYS - 1)
+    train, test = df[df["sale_date"] < cutoff], df[df["sale_date"] >= cutoff]
+    log.info(f"Train: {train['sale_date'].min().date()} to {train['sale_date'].max().date()} ({len(train):,} rows) | "
+             f"Test: {test['sale_date'].min().date()} to {test['sale_date'].max().date()} ({len(test):,} rows)")
+    y_test = test[TARGET_COL].values
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.20, random_state=RANDOM_SEED
-    )
-    log.info(f"Train size: {len(X_train):,}  |  Test size: {len(X_test):,}")
-
+    models = {
+        "LinearRegression": LinearRegression(),
+        "RandomForest": RandomForestRegressor(n_estimators=300, max_depth=8, min_samples_leaf=3,
+                                              random_state=RANDOM_SEED, n_jobs=-1),
+    }
     results = {}
+    for name, model in models.items():
+        model.fit(train[FEATURE_COLS].values, train[TARGET_COL].values)
+        y_pred = np.maximum(model.predict(test[FEATURE_COLS].values), 0)
+        results[name] = {"model": model, "y_test": y_test, "y_pred": y_pred}
+    results["RandomForest"]["feature_importances"] = models["RandomForest"].feature_importances_
+    # Naive baseline: demand on the same weekday last week
+    results["NaiveLastWeek"] = {"model": None, "y_test": y_test, "y_pred": test["lag_7_units"].values}
 
-    # -- Linear Regression --
-    log.info("Training Linear Regression ...")
-    lr = LinearRegression()
-    lr.fit(X_train, y_train)
-    y_pred_lr = lr.predict(X_test)
-    y_pred_lr = np.maximum(y_pred_lr, 0)  # predictions can't be negative
-
-    lr_r2   = r2_score(y_test, y_pred_lr)
-    lr_rmse = np.sqrt(mean_squared_error(y_test, y_pred_lr))
-    results["LinearRegression"] = {
-        "model": lr, "y_test": y_test, "y_pred": y_pred_lr,
-        "r2": lr_r2, "rmse": lr_rmse,
-    }
-    log.info(f"  Linear Regression → R²: {lr_r2:.4f}  RMSE: {lr_rmse:.4f}")
-
-    # -- Random Forest --
-    log.info("Training Random Forest (100 estimators, max_depth=10) ...")
-    rf = RandomForestRegressor(
-        n_estimators=100, max_depth=10,
-        random_state=RANDOM_SEED, n_jobs=-1
-    )
-    rf.fit(X_train, y_train)
-    y_pred_rf = rf.predict(X_test)
-    y_pred_rf = np.maximum(y_pred_rf, 0)
-
-    rf_r2   = r2_score(y_test, y_pred_rf)
-    rf_rmse = np.sqrt(mean_squared_error(y_test, y_pred_rf))
-    results["RandomForest"] = {
-        "model": rf, "y_test": y_test, "y_pred": y_pred_rf,
-        "r2": rf_r2, "rmse": rf_rmse,
-        "feature_importances": rf.feature_importances_,
-    }
-    log.info(f"  Random Forest      → R²: {rf_r2:.4f}  RMSE: {rf_rmse:.4f}")
-
+    for name, res in results.items():
+        res["r2"] = r2_score(y_test, res["y_pred"])
+        res["rmse"] = float(np.sqrt(mean_squared_error(y_test, res["y_pred"])))
+        res["accuracy"] = forecast_accuracy(y_test, res["y_pred"])
+        log.info(f"  {name:<17} R2 {res['r2']:.4f}  RMSE {res['rmse']:.2f}  forecast accuracy {res['accuracy']:.1%}")
+    results["_test"] = test.assign(rf_forecast=results["RandomForest"]["y_pred"],
+                                   naive_forecast=results["NaiveLastWeek"]["y_pred"])
     return results
+
+
+def simulate_stockouts(test: pd.DataFrame, forecast_col: str, safety: float = SAFETY_FACTOR) -> dict:
+    """
+    Weekly review per branch and category over the test weeks: at the start of each week stock is topped up to
+    (forecast demand for the coming 7 days) x safety, then that week's real demand is served day by day.
+    A stock-out day is a day on which demand exceeds the stock left.
+    """
+    stockout_days, lost_units, served, leftover, weeks = 0, 0.0, 0.0, 0.0, 0
+    for _, g in test.sort_values("sale_date").groupby(["branch_id", "category"]):
+        g = g.reset_index(drop=True)
+        for start in range(0, len(g), 7):
+            week = g.iloc[start:start + 7]
+            stock = week[forecast_col].sum() * safety
+            weeks += 1
+            for demand in week["units_sold"]:
+                if demand > stock:
+                    stockout_days += 1
+                    lost_units += demand - stock
+                    served += stock
+                    stock = 0.0
+                else:
+                    stock -= demand
+                    served += demand
+            leftover += stock
+    total = test["units_sold"].sum()
+    return {"stockout_days": int(stockout_days), "lost_units": round(lost_units, 1),
+            "fill_rate": served / total if total else 1.0,
+            "avg_unsold_per_week": round(leftover / weeks, 1) if weeks else 0.0}
+
+
+def compare_reorder_policies(test: pd.DataFrame) -> dict:
+    naive = simulate_stockouts(test, "naive_forecast")
+    model = simulate_stockouts(test, "rf_forecast")
+    reduction = 1 - model["stockout_days"] / naive["stockout_days"] if naive["stockout_days"] else 0.0
+    log.info("")
+    log.info("  STOCK-OUT SIMULATION (test weeks, weekly top-up to forecast x %.2f)" % SAFETY_FACTOR)
+    for label, r in (("Last-week policy", naive), ("Forecast policy ", model)):
+        log.info(f"  {label} : {r['stockout_days']} stock-out days, {r['lost_units']} units short, "
+                 f"fill rate {r['fill_rate']:.2%}, {r['avg_unsold_per_week']} units left over per series-week")
+    log.info(f"  Stock-out days reduced by {reduction:.1%}")
+    return {"naive": naive, "forecast": model, "stockout_reduction": reduction}
 
 
 # ---------------------------------------------------------------------------
@@ -175,23 +204,17 @@ def train_and_evaluate(df: pd.DataFrame) -> dict:
 def print_comparison_table(results: dict):
     """Print a side-by-side model comparison table."""
     log.info("")
-    log.info("=" * 55)
-    log.info("  MODEL PERFORMANCE COMPARISON")
-    log.info("=" * 55)
-    log.info(f"  {'Model':<22} {'R² Score':>10} {'RMSE':>10} {'Accuracy':>10}")
-    log.info(f"  {'-'*22} {'-'*10} {'-'*10} {'-'*10}")
+    log.info("=" * 62)
+    log.info("  MODEL PERFORMANCE ON THE HELD-OUT WEEKS")
+    log.info("=" * 62)
+    log.info(f"  {'Model':<17} {'R2':>8} {'RMSE':>8} {'Forecast accuracy (1-WAPE)':>28}")
     for name, res in results.items():
-        accuracy_pct = res["r2"] * 100
-        log.info(
-            f"  {name:<22} {res['r2']:>10.4f} "
-            f"{res['rmse']:>10.4f} {accuracy_pct:>9.1f}%"
-        )
-    log.info("=" * 55)
-    log.info("")
-
-    # Declare winner
-    best = max(results.items(), key=lambda kv: kv[1]["r2"])
-    log.info(f"  🏆  Best model: {best[0]}  (R² = {best[1]['r2']:.4f})")
+        if name.startswith("_"):
+            continue
+        log.info(f"  {name:<17} {res['r2']:>8.4f} {res['rmse']:>8.2f} {res['accuracy']:>27.1%}")
+    log.info("=" * 62)
+    best = max(((n, r) for n, r in results.items() if not n.startswith("_")), key=lambda kv: kv[1]["accuracy"])
+    log.info(f"  Best model: {best[0]} (forecast accuracy {best[1]['accuracy']:.1%})")
     log.info("")
 
 
@@ -250,7 +273,8 @@ def plot_actual_vs_predicted(results: dict):
 
     model_colors = {"LinearRegression": "#4C9BE8", "RandomForest": "#E87C4C"}
 
-    for ax, (name, res) in zip(axes, results.items()):
+    for ax, name in zip(axes, ["LinearRegression", "RandomForest"]):
+        res = results[name]
         ax.set_facecolor("#162032")
         y_test, y_pred = res["y_test"], res["y_pred"]
         max_val = max(y_test.max(), y_pred.max())
@@ -276,13 +300,29 @@ def plot_actual_vs_predicted(results: dict):
     log.info(f"  Saved: {out_path}")
 
 
+def export_results(results: dict):
+    """Write the held-out forecasts and the policy comparison for the Tableau dashboard."""
+    out = OUTPUT_DIR.parent / "exports"
+    out.mkdir(exist_ok=True)
+    cols = ["sale_date", "branch_id", "category", "units_sold", "rf_forecast", "naive_forecast"]
+    results["_test"][cols].round(2).to_csv(out / "forecast_vs_actual.csv", index=False)
+    rows = [{"model": n, "r2": round(r["r2"], 4), "rmse": round(r["rmse"], 2), "forecast_accuracy": round(r["accuracy"], 4)}
+            for n, r in results.items() if not n.startswith("_")]
+    pd.DataFrame(rows).to_csv(out / "model_metrics.csv", index=False)
+    pol = results["_policies"]
+    pd.DataFrame([{"policy": "Last-week sales", **pol["naive"]}, {"policy": "Random Forest forecast", **pol["forecast"]}]
+                 ).to_csv(out / "reorder_policy_comparison.csv", index=False)
+    log.info(f"  Exports written to {out}")
+
+
 # ---------------------------------------------------------------------------
 # Model persistence
 # ---------------------------------------------------------------------------
 
 def save_models(results: dict):
     """Serialize trained models to .pkl files."""
-    for name, res in results.items():
+    for name in ["LinearRegression", "RandomForest"]:
+        res = results[name]
         fname = name.lower().replace(" ", "_") + "_model.pkl"
         path  = OUTPUT_DIR / fname
         joblib.dump(res["model"], path)
@@ -303,6 +343,8 @@ def run_forecasting():
     results = train_and_evaluate(feat_df)
 
     print_comparison_table(results)
+    results["_policies"] = compare_reorder_policies(results["_test"])
+    export_results(results)
 
     log.info("Generating plots ...")
     plot_feature_importance(results)

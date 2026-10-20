@@ -1,0 +1,3 @@
+policy,stockout_days,lost_units,fill_rate,avg_unsold_per_week
+Last-week sales,7,108.8,0.9986408664476396,74.4
+Random Forest forecast,3,204.3,0.9974477459766733,76.8

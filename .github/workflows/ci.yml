@@ -20,4 +20,6 @@ jobs:
           python ingestion/daily_sales_pipeline.py
           python ingestion/branch_aggregator.py
           python models/forecast_models.py
-          python viz/tableau_export.py
+          python viz/trend_charts.py
+      - name: Run the tests
+        run: pip install pytest && python -m pytest tests/ -v
