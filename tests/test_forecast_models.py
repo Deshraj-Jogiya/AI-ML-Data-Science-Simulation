@@ -10,7 +10,8 @@ import forecast_models as fm  # noqa: E402
 
 def _daily(units, branch="BR001", category="Groceries"):
     dates = pd.date_range("2024-04-01", periods=len(units), freq="D")
-    return pd.DataFrame({"branch_id": branch, "category": category, "sale_date": dates, "units_sold": units})
+    return pd.DataFrame({"branch_id": branch, "category": category, "sale_date": dates, "units_sold": units,
+                         "on_promotion": 0})
 
 
 def test_features_never_see_the_target_day_or_the_six_days_before_it():

@@ -34,7 +34,7 @@ np.random.seed(RANDOM_SEED)
 
 # Simulation period: 90 days ending yesterday
 SIM_END_DATE   = datetime(2024, 6, 30)
-SIM_START_DATE = SIM_END_DATE - timedelta(days=89)  # 90 days total
+SIM_START_DATE = SIM_END_DATE - timedelta(days=365)  # one year plus a day (2023-07-01 to 2024-06-30)
 RECORDS_PER_BRANCH_PER_DAY = 30  # every product's daily sales at every branch (30 products)
 
 # ---------------------------------------------------------------------------
@@ -155,6 +155,37 @@ def day_of_week_multiplier(date: datetime) -> float:
     return 1.20 if dow >= 5 else 1.0
 
 
+# Planned promotions: each branch runs a week-long promotion on a category in about 1 week in 5, announced in
+# advance (so a forecaster can know about it), lifting that category's demand by 30-60% for the week.
+PROMO_WEEK_PROBABILITY = 0.20
+PROMO_UPLIFT_RANGE = (1.30, 1.60)
+
+
+def build_promotion_calendar() -> pd.DataFrame:
+    """Week-long promotions per branch and category, drawn with their own seed so the sales noise is unchanged."""
+    rng = np.random.default_rng(2024)
+    first_monday = SIM_START_DATE - timedelta(days=SIM_START_DATE.weekday())
+    rows = []
+    week = first_monday
+    while week <= SIM_END_DATE:
+        for br in BRANCHES:
+            for cat in CATEGORIES:
+                if rng.random() < PROMO_WEEK_PROBABILITY:
+                    rows.append({"branch_id": br["branch_id"], "category": cat, "week_start": week.strftime("%Y-%m-%d"),
+                                 "uplift": round(float(rng.uniform(*PROMO_UPLIFT_RANGE)), 3)})
+        week += timedelta(days=7)
+    return pd.DataFrame(rows, columns=["branch_id", "category", "week_start", "uplift"])
+
+
+PROMOTIONS = build_promotion_calendar()
+_PROMO_LOOKUP = {(r.branch_id, r.category, r.week_start): r.uplift for r in PROMOTIONS.itertuples()}
+
+
+def promo_multiplier(branch_id: str, category: str, date: datetime) -> float:
+    week_start = (date - timedelta(days=date.weekday())).strftime("%Y-%m-%d")
+    return _PROMO_LOOKUP.get((branch_id, category, week_start), 1.0)
+
+
 def generate_daily_records(branch: dict, date: datetime) -> list[dict]:
     """
     Generate RECORDS_PER_BRANCH_PER_DAY synthetic sales records
@@ -176,7 +207,7 @@ def generate_daily_records(branch: dict, date: datetime) -> list[dict]:
         units_sold = max(
             1,
             int(np.random.normal(
-                loc=base_units * s_mult * d_mult * br_mult,
+                loc=base_units * s_mult * d_mult * br_mult * promo_multiplier(branch["branch_id"], prod["category"], date),
                 scale=base_units * 0.3
             ))
         )
@@ -240,7 +271,9 @@ def run_pipeline():
     conn.commit()
 
     df.to_sql("branch_sales", conn, if_exists="append", index=False)
+    PROMOTIONS.to_sql("promotions", conn, if_exists="replace", index=False)
     conn.commit()
+    log.info(f"  Planned promotions : {len(PROMOTIONS)} branch-category weeks")
 
     # --- Ingestion Summary ---
     total_records = len(df)
